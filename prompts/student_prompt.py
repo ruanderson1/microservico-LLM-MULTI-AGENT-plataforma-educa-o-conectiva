@@ -46,7 +46,6 @@ Você é um assistente educacional. Gere um relatório ESTRUTURADO em JSON (apen
 Gere para cada campo com base nas informações fornecidasum relatorio detalhado sobre o desempenho acadêmico, engajamento e estado emocional do aluno, 
 incluindo recomendações para professores e pais. Use as observações qualitativas e os dados quantitativos para fundamentar suas análises e recomendações.
 
-
 {{
   "student_id": string,
   "periodo_referencia": string,
