@@ -51,19 +51,51 @@ class StudentReportRequest(BaseModel):
     atividades: List[Activity] = []
 
 
-class StudentReportResponse(BaseModel):
-    student_id: Union[str, int]
-    periodo_referencia: str
+class AcademicoResponse(BaseModel):
     desempenho_geral: str
     evolucao_recente: str
     dificuldades_aprendizagem: str
     pontos_fortes_aprendizagem: str
+
+
+class EmocionalResponse(BaseModel):
     estado_emocional_geral: str
     engajamento: str
+
+
+class RiscoResponse(BaseModel):
     risco_desempenho_baixo: str
     risco_desengajamento: str
     necessita_intervencao: bool
+
+
+class ResumoLLMResponse(BaseModel):
+    resumo_llm: str
+
+
+class RecomendacaoParaProfessorResponse(BaseModel):
+    recomendacao_para_professor: str
+
+
+class RecomendacaoParaPaisResponse(BaseModel):
+    recomendacao_para_pais: str
+
+
+class PlanoAcaoSugeridoResponse(BaseModel):
+    plano_acao_sugerido: str
+
+
+class SaidaLLMResponse(BaseModel):
     resumo_llm: str
     recomendacao_para_professor: str
     recomendacao_para_pais: str
     plano_acao_sugerido: str
+
+
+class StudentReportResponse(BaseModel):
+    student_id: Union[str, int]
+    periodo_referencia: str
+    academico: AcademicoResponse
+    emocional: EmocionalResponse
+    risco: RiscoResponse
+    saida_llm: SaidaLLMResponse

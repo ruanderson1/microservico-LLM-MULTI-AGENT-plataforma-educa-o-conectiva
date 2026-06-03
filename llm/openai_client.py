@@ -2,6 +2,7 @@ import os
 import requests
 from typing import Optional
 from dotenv import load_dotenv
+import logging
 load_dotenv()
 
 # Use variável de ambiente para a chave da API
@@ -9,6 +10,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 MODEL = "gpt-3.5-turbo"
+
+logger = logging.getLogger(__name__)
 
 class OpenAIClient:
     @staticmethod
@@ -28,9 +31,31 @@ class OpenAIClient:
             "temperature": 0.2,
             "max_tokens": 1024
         }
-        response = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=120)
-        print("OpenAI API response status:", response)
-        response.raise_for_status()
-        data = response.json()
-        print("AAAAAAAAAAAAAAAAAAAAAA", data)
-        return data["choices"][0]["message"]["content"]
+        try:
+            response = requests.post(OPENAI_URL, headers=headers, json=payload, timeout=120)
+        except requests.RequestException as exc:
+            logger.exception("OpenAI request failed")
+            raise RuntimeError(f"OpenAI request failed: {exc}") from exc
+
+        if not response.ok:
+            error_body = response.text[:1000]
+            logger.error(
+                "OpenAI API error status=%s body=%s",
+                response.status_code,
+                error_body,
+            )
+            raise RuntimeError(
+                f"OpenAI API error: {response.status_code} {response.reason} - {error_body}"
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            logger.error("OpenAI returned invalid JSON: %s", response.text[:1000])
+            raise RuntimeError("OpenAI returned invalid JSON.") from exc
+
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            logger.error("OpenAI response missing expected content: %s", data)
+            raise RuntimeError("OpenAI response missing expected content.") from exc
