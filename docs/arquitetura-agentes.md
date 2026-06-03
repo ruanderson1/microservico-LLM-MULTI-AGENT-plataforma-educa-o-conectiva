@@ -128,5 +128,5 @@ Representacao textual:
 
 ## Observacoes
 
-- Todos os agentes sao executados com chamadas independentes a OpenAIClient.generate.
-- A orquestracao atual e sequencial por dependencias de contexto entre os agentes.
+- Todos os agentes continuam executando chamadas independentes a OpenAIClient.generate.
+- A orquestracao agora e feita com LangGraph (StateGraph), preservando o mesmo encadeamento logico de dependencias entre agentes.

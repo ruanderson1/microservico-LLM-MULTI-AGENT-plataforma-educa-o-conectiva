@@ -24,9 +24,31 @@ import json
 import re
 import logging
 import time
+from typing import Any, TypedDict
+
+from langgraph.graph import END, START, StateGraph  # type: ignore[reportMissingImports]
 
 
 logger = logging.getLogger(__name__)
+
+
+class StudentReportState(TypedDict, total=False):
+    request: StudentReportRequest
+    ctx: dict[str, Any]
+    academico_data: dict[str, Any]
+    academico: AcademicoResponse
+    emocional_data: dict[str, Any]
+    emocional: EmocionalResponse
+    risco_data: dict[str, Any]
+    risco: RiscoResponse
+    resumo_data: dict[str, Any]
+    resumo: ResumoLLMResponse
+    recomendacao_professor_data: dict[str, Any]
+    recomendacao_professor: RecomendacaoParaProfessorResponse
+    recomendacao_pais_data: dict[str, Any]
+    recomendacao_pais: RecomendacaoParaPaisResponse
+    plano_data: dict[str, Any]
+    plano: PlanoAcaoSugeridoResponse
 
 
 def _parse_llm_json(llm_response: str) -> dict:
@@ -92,193 +114,171 @@ def _build_shared_context(request: StudentReportRequest) -> dict:
     }
 
 
+def _run_agent(request: StudentReportRequest, agent_name: str, prompt: str) -> dict[str, Any]:
+    start = time.perf_counter()
+    try:
+        data = _parse_llm_json(OpenAIClient.generate(prompt))
+        logger.info(
+            "student_report.agent_done agent=%s student_id=%s duration_ms=%d",
+            agent_name,
+            request.student_id,
+            int((time.perf_counter() - start) * 1000),
+        )
+        return data
+    except Exception:
+        logger.exception(
+            "student_report.failed agent=%s student_id=%s periodo=%s",
+            agent_name,
+            request.student_id,
+            request.periodo_referencia,
+        )
+        raise
+
+
+def _node_academico(state: StudentReportState) -> StudentReportState:
+    request = state["request"]
+    ctx = state["ctx"]
+    data = _run_agent(request, "academico", build_academico_prompt(request, ctx))
+    return {"academico_data": data, "academico": AcademicoResponse(**data)}
+
+
+def _node_emocional(state: StudentReportState) -> StudentReportState:
+    request = state["request"]
+    ctx = state["ctx"]
+    data = _run_agent(request, "emocional", build_emocional_prompt(request, ctx))
+    return {"emocional_data": data, "emocional": EmocionalResponse(**data)}
+
+
+def _node_risco(state: StudentReportState) -> StudentReportState:
+    request = state["request"]
+    ctx = state["ctx"]
+    data = _run_agent(request, "risco", build_risco_prompt(request, ctx))
+    return {"risco_data": data, "risco": RiscoResponse(**data)}
+
+
+def _node_resumo(state: StudentReportState) -> StudentReportState:
+    request = state["request"]
+    ctx = state["ctx"]
+    data = _run_agent(
+        request,
+        "resumo_llm",
+        build_resumo_llm_prompt(
+            request,
+            ctx,
+            state["academico_data"],
+            state["emocional_data"],
+            state["risco_data"],
+        ),
+    )
+    return {"resumo_data": data, "resumo": ResumoLLMResponse(**data)}
+
+
+def _node_recomendacao_professor(state: StudentReportState) -> StudentReportState:
+    request = state["request"]
+    ctx = state["ctx"]
+    data = _run_agent(
+        request,
+        "recomendacao_para_professor",
+        build_recomendacao_para_professor_prompt(
+            request,
+            ctx,
+            state["academico_data"],
+            state["emocional_data"],
+            state["risco_data"],
+            state["resumo_data"],
+        ),
+    )
+    return {
+        "recomendacao_professor_data": data,
+        "recomendacao_professor": RecomendacaoParaProfessorResponse(**data),
+    }
+
+
+def _node_recomendacao_pais(state: StudentReportState) -> StudentReportState:
+    request = state["request"]
+    ctx = state["ctx"]
+    data = _run_agent(
+        request,
+        "recomendacao_para_pais",
+        build_recomendacao_para_pais_prompt(
+            request,
+            ctx,
+            state["academico_data"],
+            state["emocional_data"],
+            state["risco_data"],
+            state["resumo_data"],
+            state["recomendacao_professor_data"],
+        ),
+    )
+    return {"recomendacao_pais_data": data, "recomendacao_pais": RecomendacaoParaPaisResponse(**data)}
+
+
+def _node_plano_acao(state: StudentReportState) -> StudentReportState:
+    request = state["request"]
+    ctx = state["ctx"]
+    data = _run_agent(
+        request,
+        "plano_acao_sugerido",
+        build_plano_acao_sugerido_prompt(
+            request,
+            ctx,
+            state["academico_data"],
+            state["emocional_data"],
+            state["risco_data"],
+            state["resumo_data"],
+            state["recomendacao_professor_data"],
+            state["recomendacao_pais_data"],
+        ),
+    )
+    return {"plano_data": data, "plano": PlanoAcaoSugeridoResponse(**data)}
+
+
+def _build_student_report_graph():
+    graph = StateGraph(StudentReportState)
+
+    graph.add_node("academico", _node_academico)
+    graph.add_node("emocional", _node_emocional)
+    graph.add_node("risco", _node_risco)
+    graph.add_node("resumo", _node_resumo)
+    graph.add_node("recomendacao_professor", _node_recomendacao_professor)
+    graph.add_node("recomendacao_pais", _node_recomendacao_pais)
+    graph.add_node("plano_acao", _node_plano_acao)
+
+    graph.add_edge(START, "academico")
+    graph.add_edge("academico", "emocional")
+    graph.add_edge("emocional", "risco")
+    graph.add_edge("risco", "resumo")
+    graph.add_edge("resumo", "recomendacao_professor")
+    graph.add_edge("recomendacao_professor", "recomendacao_pais")
+    graph.add_edge("recomendacao_pais", "plano_acao")
+    graph.add_edge("plano_acao", END)
+
+    return graph.compile()
+
+
+STUDENT_REPORT_GRAPH = _build_student_report_graph()
+
+
 async def generate_student_report(request: StudentReportRequest) -> StudentReportResponse:
-    ctx = _build_shared_context(request)
     logger.info(
         "student_report.start student_id=%s periodo=%s",
         request.student_id,
         request.periodo_referencia,
     )
+    final_state = STUDENT_REPORT_GRAPH.invoke(
+        {
+            "request": request,
+            "ctx": _build_shared_context(request),
+        }
+    )
 
-    # Agent 1: Academic performance
-    try:
-        start_academico = time.perf_counter()
-        academico_data = _parse_llm_json(
-            OpenAIClient.generate(build_academico_prompt(request, ctx))
-        )
-        academico = AcademicoResponse(**academico_data)
-        logger.info(
-            "student_report.agent_done agent=academico student_id=%s duration_ms=%d",
-            request.student_id,
-            int((time.perf_counter() - start_academico) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "student_report.failed agent=academico student_id=%s periodo=%s",
-            request.student_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    # Agent 2: Socioemotional state and engagement
-    try:
-        start_emocional = time.perf_counter()
-        emocional_data = _parse_llm_json(
-            OpenAIClient.generate(build_emocional_prompt(request, ctx))
-        )
-        emocional = EmocionalResponse(**emocional_data)
-        logger.info(
-            "student_report.agent_done agent=emocional student_id=%s duration_ms=%d",
-            request.student_id,
-            int((time.perf_counter() - start_emocional) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "student_report.failed agent=emocional student_id=%s periodo=%s",
-            request.student_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    # Agent 3: Risk assessment
-    try:
-        start_risco = time.perf_counter()
-        risco_data = _parse_llm_json(
-            OpenAIClient.generate(build_risco_prompt(request, ctx))
-        )
-        risco = RiscoResponse(**risco_data)
-        logger.info(
-            "student_report.agent_done agent=risco student_id=%s duration_ms=%d",
-            request.student_id,
-            int((time.perf_counter() - start_risco) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "student_report.failed agent=risco student_id=%s periodo=%s",
-            request.student_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    # Agent 4: Resumo LLM (depends on previous analysis agents)
-    try:
-        start_resumo = time.perf_counter()
-        resumo_data = _parse_llm_json(
-            OpenAIClient.generate(
-                build_resumo_llm_prompt(
-                    request,
-                    ctx,
-                    academico_data,
-                    emocional_data,
-                    risco_data,
-                )
-            )
-        )
-        resumo = ResumoLLMResponse(**resumo_data)
-        logger.info(
-            "student_report.agent_done agent=resumo_llm student_id=%s duration_ms=%d",
-            request.student_id,
-            int((time.perf_counter() - start_resumo) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "student_report.failed agent=resumo_llm student_id=%s periodo=%s",
-            request.student_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    # Agent 5: Recommendation for teacher (depends on resumo + previous analyses)
-    try:
-        start_recomendacao_professor = time.perf_counter()
-        recomendacao_professor_data = _parse_llm_json(
-            OpenAIClient.generate(
-                build_recomendacao_para_professor_prompt(
-                    request,
-                    ctx,
-                    academico_data,
-                    emocional_data,
-                    risco_data,
-                    resumo_data,
-                )
-            )
-        )
-        recomendacao_professor = RecomendacaoParaProfessorResponse(
-            **recomendacao_professor_data
-        )
-        logger.info(
-            "student_report.agent_done agent=recomendacao_para_professor student_id=%s duration_ms=%d",
-            request.student_id,
-            int((time.perf_counter() - start_recomendacao_professor) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "student_report.failed agent=recomendacao_para_professor student_id=%s periodo=%s",
-            request.student_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    # Agent 6: Recommendation for parents (depends on resumo + recommendation for teacher)
-    try:
-        start_recomendacao_pais = time.perf_counter()
-        recomendacao_pais_data = _parse_llm_json(
-            OpenAIClient.generate(
-                build_recomendacao_para_pais_prompt(
-                    request,
-                    ctx,
-                    academico_data,
-                    emocional_data,
-                    risco_data,
-                    resumo_data,
-                    recomendacao_professor_data,
-                )
-            )
-        )
-        recomendacao_pais = RecomendacaoParaPaisResponse(**recomendacao_pais_data)
-        logger.info(
-            "student_report.agent_done agent=recomendacao_para_pais student_id=%s duration_ms=%d",
-            request.student_id,
-            int((time.perf_counter() - start_recomendacao_pais) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "student_report.failed agent=recomendacao_para_pais student_id=%s periodo=%s",
-            request.student_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    # Agent 7: Suggested action plan (depends on all previous output agents)
-    try:
-        start_plano = time.perf_counter()
-        plano_data = _parse_llm_json(
-            OpenAIClient.generate(
-                build_plano_acao_sugerido_prompt(
-                    request,
-                    ctx,
-                    academico_data,
-                    emocional_data,
-                    risco_data,
-                    resumo_data,
-                    recomendacao_professor_data,
-                    recomendacao_pais_data,
-                )
-            )
-        )
-        plano = PlanoAcaoSugeridoResponse(**plano_data)
-        logger.info(
-            "student_report.agent_done agent=plano_acao_sugerido student_id=%s duration_ms=%d",
-            request.student_id,
-            int((time.perf_counter() - start_plano) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "student_report.failed agent=plano_acao_sugerido student_id=%s periodo=%s",
-            request.student_id,
-            request.periodo_referencia,
-        )
-        raise
+    academico = final_state["academico"]
+    emocional = final_state["emocional"]
+    risco = final_state["risco"]
+    resumo = final_state["resumo"]
+    recomendacao_professor = final_state["recomendacao_professor"]
+    recomendacao_pais = final_state["recomendacao_pais"]
+    plano = final_state["plano"]
 
     saida_llm = SaidaLLMResponse(
         resumo_llm=resumo.resumo_llm,

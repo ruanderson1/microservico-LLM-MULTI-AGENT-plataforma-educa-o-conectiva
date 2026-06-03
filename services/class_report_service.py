@@ -20,9 +20,26 @@ import json
 import re
 import logging
 import time
+from typing import Any, TypedDict
+
+from langgraph.graph import END, START, StateGraph
 
 
 logger = logging.getLogger(__name__)
+
+
+class ClassReportState(TypedDict, total=False):
+    request: ClassReportRequest
+    agregado_data: dict[str, Any]
+    agregado: ClassAgregadoAlunosResponse
+    risco_data: dict[str, Any]
+    risco: ClassRiscoColetivoResponse
+    resumo_data: dict[str, Any]
+    resumo: ClassResumoLLMTurmaResponse
+    recomendacao_data: dict[str, Any]
+    recomendacao: ClassRecomendacaoParaProfessorTurmaResponse
+    plano_data: dict[str, Any]
+    plano: ClassPlanoAcaoTurmaResponse
 
 
 def _parse_llm_json(llm_response: str) -> dict:
@@ -35,6 +52,105 @@ def _parse_llm_json(llm_response: str) -> dict:
         raise ValueError("LLM did not return valid JSON.")
 
 
+def _run_agent(request: ClassReportRequest, agent_name: str, prompt: str) -> dict[str, Any]:
+    start = time.perf_counter()
+    try:
+        data = _parse_llm_json(OpenAIClient.generate(prompt))
+        logger.info(
+            "class_report.agent_done agent=%s class_id=%s duration_ms=%d",
+            agent_name,
+            request.class_id,
+            int((time.perf_counter() - start) * 1000),
+        )
+        return data
+    except Exception:
+        logger.exception(
+            "class_report.failed agent=%s class_id=%s periodo=%s",
+            agent_name,
+            request.class_id,
+            request.periodo_referencia,
+        )
+        raise
+
+
+def _node_agregado(state: ClassReportState) -> ClassReportState:
+    request = state["request"]
+    data = _run_agent(request, "agregado_alunos", build_class_agregado_prompt(request))
+    return {"agregado_data": data, "agregado": ClassAgregadoAlunosResponse(**data)}
+
+
+def _node_risco(state: ClassReportState) -> ClassReportState:
+    request = state["request"]
+    data = _run_agent(request, "risco_coletivo", build_class_risco_prompt(request))
+    return {"risco_data": data, "risco": ClassRiscoColetivoResponse(**data)}
+
+
+def _node_resumo(state: ClassReportState) -> ClassReportState:
+    request = state["request"]
+    data = _run_agent(
+        request,
+        "resumo_llm_turma",
+        build_class_resumo_llm_turma_prompt(request, state["agregado_data"], state["risco_data"]),
+    )
+    return {"resumo_data": data, "resumo": ClassResumoLLMTurmaResponse(**data)}
+
+
+def _node_recomendacao(state: ClassReportState) -> ClassReportState:
+    request = state["request"]
+    data = _run_agent(
+        request,
+        "recomendacao_para_professor_turma",
+        build_class_recomendacao_para_professor_turma_prompt(
+            request,
+            state["agregado_data"],
+            state["risco_data"],
+            state["resumo_data"],
+        ),
+    )
+    return {
+        "recomendacao_data": data,
+        "recomendacao": ClassRecomendacaoParaProfessorTurmaResponse(**data),
+    }
+
+
+def _node_plano(state: ClassReportState) -> ClassReportState:
+    request = state["request"]
+    data = _run_agent(
+        request,
+        "plano_acao_turma",
+        build_class_plano_acao_turma_prompt(
+            request,
+            state["agregado_data"],
+            state["risco_data"],
+            state["resumo_data"],
+            state["recomendacao_data"],
+        ),
+    )
+    return {"plano_data": data, "plano": ClassPlanoAcaoTurmaResponse(**data)}
+
+
+def _build_class_report_graph():
+    graph = StateGraph(ClassReportState)
+
+    graph.add_node("agregado", _node_agregado)
+    graph.add_node("risco", _node_risco)
+    graph.add_node("resumo", _node_resumo)
+    graph.add_node("recomendacao", _node_recomendacao)
+    graph.add_node("plano", _node_plano)
+
+    graph.add_edge(START, "agregado")
+    graph.add_edge("agregado", "risco")
+    graph.add_edge("risco", "resumo")
+    graph.add_edge("resumo", "recomendacao")
+    graph.add_edge("recomendacao", "plano")
+    graph.add_edge("plano", END)
+
+    return graph.compile()
+
+
+CLASS_REPORT_GRAPH = _build_class_report_graph()
+
+
 async def generate_class_report(request: ClassReportRequest) -> ClassReportResponse:
     logger.info(
         "class_report.start class_id=%s periodo=%s students=%d",
@@ -43,119 +159,13 @@ async def generate_class_report(request: ClassReportRequest) -> ClassReportRespo
         len(request.students),
     )
 
-    try:
-        start_agregado = time.perf_counter()
-        agregado_data = _parse_llm_json(
-            OpenAIClient.generate(build_class_agregado_prompt(request))
-        )
-        agregado = ClassAgregadoAlunosResponse(**agregado_data)
-        logger.info(
-            "class_report.agent_done agent=agregado_alunos class_id=%s duration_ms=%d",
-            request.class_id,
-            int((time.perf_counter() - start_agregado) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "class_report.failed agent=agregado_alunos class_id=%s periodo=%s",
-            request.class_id,
-            request.periodo_referencia,
-        )
-        raise
+    final_state = CLASS_REPORT_GRAPH.invoke({"request": request})
 
-    try:
-        start_risco = time.perf_counter()
-        risco_data = _parse_llm_json(
-            OpenAIClient.generate(build_class_risco_prompt(request))
-        )
-        risco = ClassRiscoColetivoResponse(**risco_data)
-        logger.info(
-            "class_report.agent_done agent=risco_coletivo class_id=%s duration_ms=%d",
-            request.class_id,
-            int((time.perf_counter() - start_risco) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "class_report.failed agent=risco_coletivo class_id=%s periodo=%s",
-            request.class_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    try:
-        start_resumo = time.perf_counter()
-        resumo_data = _parse_llm_json(
-            OpenAIClient.generate(
-                build_class_resumo_llm_turma_prompt(request, agregado_data, risco_data)
-            )
-        )
-        resumo = ClassResumoLLMTurmaResponse(**resumo_data)
-        logger.info(
-            "class_report.agent_done agent=resumo_llm_turma class_id=%s duration_ms=%d",
-            request.class_id,
-            int((time.perf_counter() - start_resumo) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "class_report.failed agent=resumo_llm_turma class_id=%s periodo=%s",
-            request.class_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    try:
-        start_recomendacao = time.perf_counter()
-        recomendacao_data = _parse_llm_json(
-            OpenAIClient.generate(
-                build_class_recomendacao_para_professor_turma_prompt(
-                    request,
-                    agregado_data,
-                    risco_data,
-                    resumo_data,
-                )
-            )
-        )
-        recomendacao = ClassRecomendacaoParaProfessorTurmaResponse(
-            **recomendacao_data
-        )
-        logger.info(
-            "class_report.agent_done agent=recomendacao_para_professor_turma class_id=%s duration_ms=%d",
-            request.class_id,
-            int((time.perf_counter() - start_recomendacao) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "class_report.failed agent=recomendacao_para_professor_turma class_id=%s periodo=%s",
-            request.class_id,
-            request.periodo_referencia,
-        )
-        raise
-
-    try:
-        start_plano = time.perf_counter()
-        plano_data = _parse_llm_json(
-            OpenAIClient.generate(
-                build_class_plano_acao_turma_prompt(
-                    request,
-                    agregado_data,
-                    risco_data,
-                    resumo_data,
-                    recomendacao_data,
-                )
-            )
-        )
-        plano = ClassPlanoAcaoTurmaResponse(**plano_data)
-        logger.info(
-            "class_report.agent_done agent=plano_acao_turma class_id=%s duration_ms=%d",
-            request.class_id,
-            int((time.perf_counter() - start_plano) * 1000),
-        )
-    except Exception:
-        logger.exception(
-            "class_report.failed agent=plano_acao_turma class_id=%s periodo=%s",
-            request.class_id,
-            request.periodo_referencia,
-        )
-        raise
+    agregado = final_state["agregado"]
+    risco = final_state["risco"]
+    resumo = final_state["resumo"]
+    recomendacao = final_state["recomendacao"]
+    plano = final_state["plano"]
 
     saida = ClassSaidaLLMTurmaResponse(
         resumo_llm_turma=resumo.resumo_llm_turma,
